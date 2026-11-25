@@ -1403,6 +1403,88 @@ func (h *TorrentHandler) TestConnection(c *gin.Context) {
 	})
 }
 
+// TestQbitConnection tests connectivity to the remote qBittorrent WebUI
+func (h *TorrentHandler) TestQbitConnection(c *gin.Context) {
+	var config models.TorrentConfig
+	if err := h.db.First(&config).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Config not found"})
+		return
+	}
+
+	if config.QbitURL == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "qBittorrent URL not configured",
+			"success": false,
+		})
+		return
+	}
+
+	qbit := torrent.NewQbitClient(config.QbitURL, config.QbitUsername, config.QbitPassword)
+	if err := qbit.TestConnection(); err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   fmt.Sprintf("qBittorrent connection failed: %v", err),
+			"success": false,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "qBittorrent connection successful",
+		"qbit_url": config.QbitURL,
+	})
+}
+
+// GetQbitDownloads returns current downloads from the remote qBittorrent instance
+func (h *TorrentHandler) GetQbitDownloads(c *gin.Context) {
+	var config models.TorrentConfig
+	if err := h.db.First(&config).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Config not found"})
+		return
+	}
+
+	if !config.UseRemoteClient || config.QbitURL == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Remote qBittorrent client not enabled"})
+		return
+	}
+
+	qbit := torrent.NewQbitClient(config.QbitURL, config.QbitUsername, config.QbitPassword)
+	torrents, err := qbit.GetTorrents()
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": fmt.Sprintf("Failed to get torrents: %v", err)})
+		return
+	}
+
+	// Convert to HomeFlix-friendly format
+	var result []map[string]interface{}
+	for _, t := range torrents {
+		item := map[string]interface{}{
+			"id":             t.Hash,
+			"name":           t.Name,
+			"status":         torrent.QbitStateToHomeFlix(t.State),
+			"qbit_state":     t.State,
+			"progress":       t.Progress,
+			"size":           t.Size,
+			"downloaded":     t.Downloaded,
+			"download_rate":  t.DownloadSpeed,
+			"upload_rate":    t.UploadSpeed,
+			"seeders":        t.Seeders,
+			"peers":          t.Peers,
+			"save_path":      t.SavePath,
+			"added_on":       t.AddedOn,
+			"completion_on":  t.CompletedOn,
+		}
+		result = append(result, item)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"torrents": result,
+		"count":    len(result),
+		"source":   "remote_qbittorrent",
+		"qbit_url": config.QbitURL,
+	})
+}
+
 // Get bandwidth statistics
 func (h *TorrentHandler) GetBandwidthStats(c *gin.Context) {
 	if h.client == nil {
