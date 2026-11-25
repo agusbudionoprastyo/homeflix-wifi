@@ -384,6 +384,10 @@ func main() {
 	}
 
 	// Start server with optimizations
+	host := os.Getenv("HOST")
+	if host == "" {
+		host = "0.0.0.0"
+	}
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8252"
@@ -391,7 +395,7 @@ func main() {
 
 	// Create HTTP server with optimized settings
 	srv := &http.Server{
-		Addr:           "0.0.0.0:" + port,
+		Addr:           host + ":" + port,
 		Handler:        r,
 		ReadTimeout:    30 * time.Second,  // Prevent slow clients from hanging server
 		WriteTimeout:   5 * time.Minute,   // Stream handlers lift this per response (prepareLongStream)

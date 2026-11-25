@@ -3196,76 +3196,6 @@ func (s *MediaScanner) findExternalSubtitles(videoPath string) []ExternalSubtitl
 	// Common subtitle extensions
 	subtitleExts := []string{".srt", ".vtt", ".ass", ".ssa", ".sub", ".idx", ".sbv", ".ttml", ".dfxp"}
 
-	// Enhanced language patterns to detect
-	langPatterns := map[string]string{
-		"en":         "English",
-		"eng":        "English",
-		"english":    "English",
-		"es":         "Spanish",
-		"spa":        "Spanish",
-		"spanish":    "Spanish",
-		"fr":         "French",
-		"fre":        "French",
-		"french":     "French",
-		"de":         "German",
-		"ger":        "German",
-		"german":     "German",
-		"it":         "Italian",
-		"ita":        "Italian",
-		"italian":    "Italian",
-		"pt":         "Portuguese",
-		"por":        "Portuguese",
-		"portuguese": "Portuguese",
-		"ru":         "Russian",
-		"rus":        "Russian",
-		"russian":    "Russian",
-		"ja":         "Japanese",
-		"jpn":        "Japanese",
-		"japanese":   "Japanese",
-		"ko":         "Korean",
-		"kor":        "Korean",
-		"korean":     "Korean",
-		"zh":         "Chinese",
-		"chi":        "Chinese",
-		"chinese":    "Chinese",
-		"ar":         "Arabic",
-		"ara":        "Arabic",
-		"arabic":     "Arabic",
-		"hi":         "Hindi",
-		"hin":        "Hindi",
-		"hindi":      "Hindi",
-		"nl":         "Dutch",
-		"dut":        "Dutch",
-		"dutch":      "Dutch",
-		"sv":         "Swedish",
-		"swe":        "Swedish",
-		"swedish":    "Swedish",
-		"no":         "Norwegian",
-		"nor":        "Norwegian",
-		"norwegian":  "Norwegian",
-		"da":         "Danish",
-		"dan":        "Danish",
-		"danish":     "Danish",
-		"fi":         "Finnish",
-		"fin":        "Finnish",
-		"finnish":    "Finnish",
-		"pl":         "Polish",
-		"pol":        "Polish",
-		"polish":     "Polish",
-		"tr":         "Turkish",
-		"tur":        "Turkish",
-		"turkish":    "Turkish",
-		"he":         "Hebrew",
-		"heb":        "Hebrew",
-		"hebrew":     "Hebrew",
-		"th":         "Thai",
-		"tha":        "Thai",
-		"thai":       "Thai",
-		"vi":         "Vietnamese",
-		"vie":        "Vietnamese",
-		"vietnamese": "Vietnamese",
-	}
-
 	log.Printf("🔍 Scanning for external subtitles in: %s", dir)
 	log.Printf("🎬 Video base name: %s", baseName)
 
@@ -3350,42 +3280,7 @@ func (s *MediaScanner) findExternalSubtitles(videoPath string) []ExternalSubtitl
 		}
 
 		// Extract language from filename
-		language := "Unknown"
-
-		// Enhanced language detection
-		fileNameForLang := strings.ToLower(fileName)
-
-		// Try to extract language from filename patterns
-		for code, lang := range langPatterns {
-			// Pattern 1: .lang. (e.g., movie.en.srt)
-			pattern1 := fmt.Sprintf(`\.%s\.`, code)
-			if matched, _ := regexp.MatchString(pattern1, fileNameForLang); matched {
-				language = lang
-				break
-			}
-
-			// Pattern 2: _lang_ (e.g., movie_en_srt)
-			pattern2 := fmt.Sprintf(`_%s_`, code)
-			if matched, _ := regexp.MatchString(pattern2, fileNameForLang); matched {
-				language = lang
-				break
-			}
-
-			// Pattern 3: -lang- (e.g., movie-en-srt)
-			pattern3 := fmt.Sprintf(`-%s-`, code)
-			if matched, _ := regexp.MatchString(pattern3, fileNameForLang); matched {
-				language = lang
-				break
-			}
-
-			// Pattern 4: lang at end (e.g., movie.en.srt, movie_en.srt)
-			pattern4 := fmt.Sprintf(`[._-]%s$`, code)
-			baseWithoutExt := strings.TrimSuffix(fileNameForLang, fileExt)
-			if matched, _ := regexp.MatchString(pattern4, baseWithoutExt); matched {
-				language = lang
-				break
-			}
-		}
+		language := utils.ExtractSubtitleLanguageFromFilename(fileName)
 
 		// Get absolute file path
 		fullPath := filepath.Join(dir, fileName)
@@ -4114,7 +4009,7 @@ func (s *MediaScanner) findCorrespondingVideo(subtitlePath string) string {
 	baseName := strings.TrimSuffix(filepath.Base(subtitlePath), filepath.Ext(subtitlePath))
 
 	// Remove language suffix if present (e.g., "movie.en.srt" -> "movie")
-	baseName = regexp.MustCompile(`\.(en|es|fr|de|it|pt|ru|ja|ko|zh|ar)$`).ReplaceAllString(baseName, "")
+	baseName = utils.StripSubtitleLanguageSuffix(baseName)
 
 	videoExts := []string{".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v"}
 
@@ -4129,41 +4024,7 @@ func (s *MediaScanner) findCorrespondingVideo(subtitlePath string) string {
 }
 
 func (s *MediaScanner) extractLanguageFromSubtitle(path string) string {
-	filename := filepath.Base(path)
-
-	// Common language patterns
-	langPatterns := map[string]string{
-		`\.en\.`:  "English",
-		`\.eng\.`: "English",
-		`\.es\.`:  "Spanish",
-		`\.spa\.`: "Spanish",
-		`\.fr\.`:  "French",
-		`\.fre\.`: "French",
-		`\.de\.`:  "German",
-		`\.ger\.`: "German",
-		`\.it\.`:  "Italian",
-		`\.ita\.`: "Italian",
-		`\.pt\.`:  "Portuguese",
-		`\.por\.`: "Portuguese",
-		`\.ru\.`:  "Russian",
-		`\.rus\.`: "Russian",
-		`\.ja\.`:  "Japanese",
-		`\.jpn\.`: "Japanese",
-		`\.ko\.`:  "Korean",
-		`\.kor\.`: "Korean",
-		`\.zh\.`:  "Chinese",
-		`\.chi\.`: "Chinese",
-		`\.ar\.`:  "Arabic",
-		`\.ara\.`: "Arabic",
-	}
-
-	for pattern, language := range langPatterns {
-		if matched, _ := regexp.MatchString(pattern, filename); matched {
-			return language
-		}
-	}
-
-	return "Unknown"
+	return utils.ExtractSubtitleLanguageFromFilename(path)
 }
 
 func (s *MediaScanner) extractGenresFromPath(path, title string) []string {

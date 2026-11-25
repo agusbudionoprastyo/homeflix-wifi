@@ -1372,8 +1372,9 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ media, isOpen, onClose, start
   const parseSRT = (srtText: string) => {
     const cues = [];
 
-    // Normalize line endings and clean up the text
+    // Normalize line endings and strip UTF-8 BOM
     const normalizedText = srtText
+      .replace(/^\uFEFF/, '')
       .replace(/\r\n/g, '\n')
       .replace(/\r/g, '\n')
       .trim();
@@ -4522,7 +4523,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ media, isOpen, onClose, start
             isOpen={showSettings}
             onClose={() => setShowSettings(false)}
             mediaId={media.id}
-            currentSubtitleTrack={currentSubtitleTrack}
+            currentSubtitleTrack={subtitlesEnabled ? currentSubtitleTrack : null}
             currentAudioTrack={currentAudioTrack}
             playbackRate={playbackRate}
             onSubtitleTrackChange={handleSubtitleTrackChange}

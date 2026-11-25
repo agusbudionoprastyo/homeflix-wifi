@@ -18,6 +18,7 @@ import (
 	"homeflix-backend/internal/interfaces"
 	"homeflix-backend/internal/models"
 	"homeflix-backend/internal/services"
+	"homeflix-backend/internal/utils"
 
 	"github.com/gin-gonic/gin"
 )
@@ -1472,7 +1473,44 @@ func GetSubtitleTracks(mediaService *services.MediaService) gin.HandlerFunc {
 			return
 		}
 
-		c.JSON(http.StatusOK, tracks)
+		var videoDir string
+		if media, err := mediaService.GetMediaByID(uint(id)); err == nil && media.FilePath != "" {
+			videoDir = filepath.Dir(media.FilePath)
+		}
+
+		validTracks := make([]models.SubtitleTrack, 0, len(tracks))
+		for _, track := range tracks {
+			if track.TrackType == "external" && track.FilePath != "" {
+				resolvedPath := track.FilePath
+				if _, err := os.Stat(resolvedPath); err != nil {
+					altPath := ""
+					if videoDir != "" {
+						altPath = filepath.Join(videoDir, filepath.Base(track.FilePath))
+					}
+					if altPath == "" {
+						go mediaService.DeleteSubtitleTrack(track.ID)
+						continue
+					}
+					if _, altErr := os.Stat(altPath); altErr != nil {
+						go mediaService.DeleteSubtitleTrack(track.ID)
+						continue
+					}
+					resolvedPath = altPath
+					track.FilePath = altPath
+				}
+				if strings.EqualFold(track.Language, "Unknown") || track.Language == "" {
+					if detected := utils.ExtractSubtitleLanguageFromFilename(resolvedPath); detected != "Unknown" {
+						track.Language = detected
+						if strings.HasPrefix(track.Title, "Unknown") || track.Title == "" {
+							track.Title = fmt.Sprintf("%s (External)", detected)
+						}
+					}
+				}
+			}
+			validTracks = append(validTracks, track)
+		}
+
+		c.JSON(http.StatusOK, validTracks)
 	}
 }
 

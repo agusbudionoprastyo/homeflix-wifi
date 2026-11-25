@@ -49,6 +49,13 @@ type TorrentConfig struct {
 	DownloadSpeedLimit int64 `json:"download_speed_limit" gorm:"default:0"` // 0 = unlimited
 	UploadSpeedLimit   int64 `json:"upload_speed_limit" gorm:"default:0"`   // 0 = unlimited
 
+	// Remote qBittorrent client settings (for downloading via external qBittorrent instance)
+	UseRemoteClient bool   `json:"use_remote_client" gorm:"default:false"`
+	QbitURL         string `json:"qbit_url" gorm:"default:''"`      // e.g. "http://45.77.34.174:8080"
+	QbitUsername    string `json:"qbit_username" gorm:"default:''"`
+	QbitPassword    string `json:"qbit_password" gorm:"default:''"`
+	QbitSavePath    string `json:"qbit_save_path" gorm:"default:'C:\\homeflix-downloads'"` // Save path on remote machine
+
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
 }

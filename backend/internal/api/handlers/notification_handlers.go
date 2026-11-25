@@ -74,6 +74,10 @@ func (h *NotificationHandlers) GetNotificationCount(c *gin.Context) {
 
 // MarkNotificationAsRead marks a notification as read
 func (h *NotificationHandlers) MarkNotificationAsRead(c *gin.Context) {
+	if h.notificationService == nil {
+		c.JSON(http.StatusOK, gin.H{"success": true, "message": "Notifications disabled"})
+		return
+	}
 	notificationID := c.Param("id")
 
 	if err := h.notificationService.MarkAsRead(notificationID); err != nil {

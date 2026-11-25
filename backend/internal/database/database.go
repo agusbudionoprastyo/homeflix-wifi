@@ -226,13 +226,19 @@ func initializeDefaultMediaPaths(db *gorm.DB) {
 
 	// Only create default paths if none exist
 	if count == 0 {
-		// Get home directory for torrent downloads
-		homeDir, _ := os.UserHomeDir()
-		torrentPath := filepath.Join(homeDir, "Downloads", "homeflix")
+		primaryPath := strings.TrimSpace(os.Getenv("MEDIA_PATH"))
+		if primaryPath == "" {
+			primaryPath = "/media/azad/Movies1"
+		}
+		torrentPath := strings.TrimSpace(os.Getenv("DOWNLOADS_PATH"))
+		if torrentPath == "" {
+			homeDir, _ := os.UserHomeDir()
+			torrentPath = filepath.Join(homeDir, "Downloads", "homeflix")
+		}
 
 		defaultPaths := []models.MediaPath{
 			{
-				Path:        "/media/azad/Movies1",
+				Path:        primaryPath,
 				Name:        "Primary Movies Directory",
 				Description: "Main HomeFlix media collection",
 				PathType:    "primary",
@@ -255,7 +261,7 @@ func initializeDefaultMediaPaths(db *gorm.DB) {
 		}
 
 		log.Println("✅ Default media paths initialized")
-		log.Printf("📁 Primary media path: /media/azad/Movies1")
+		log.Printf("📁 Primary media path: %s", primaryPath)
 		log.Printf("📁 Torrent download path: %s", torrentPath)
 		log.Printf("💡 Add more storage via Settings → Media Paths for auto-failover (no hardcodes)")
 	} else {

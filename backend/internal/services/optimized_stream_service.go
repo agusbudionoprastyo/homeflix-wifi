@@ -667,8 +667,7 @@ func (pool *IOWorkerPool) readFileChunk(filePath string, offset, size int64) ([]
 	// Enable direct I/O for large reads
 	if size > 1024*1024 { // > 1MB
 		if fd := int(file.Fd()); fd > 0 {
-			// Set O_DIRECT flag for bypassing page cache
-			syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), syscall.F_SETFL, syscall.O_DIRECT)
+			enableDirectIO(fd)
 		}
 	}
 
@@ -2166,16 +2165,11 @@ func (s *NetflixStreamService) streamRangeWithSendfile(w http.ResponseWriter, fi
 
 	// Use sendfile syscall for zero-copy transfer
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
-		tcpFile, err := tcpConn.File()
-		if err == nil {
-			defer tcpFile.Close()
-
-			// Direct sendfile syscall with offset
-			offsetPtr := offset
-			written, err := syscall.Sendfile(int(tcpFile.Fd()), int(file.Fd()), &offsetPtr, int(length))
-			if err == nil && int64(written) == length {
-				return nil
-			}
+		// Direct sendfile syscall with offset
+		offsetPtr := offset
+		written, err := transferSendfileOrCopy(tcpConn, file, &offsetPtr, int(length))
+		if err == nil && int64(written) == length {
+			return nil
 		}
 	}
 
@@ -2230,12 +2224,6 @@ func (s *NetflixStreamService) streamWithSendfileZeroCopy(w http.ResponseWriter,
 
 	// Use sendfile for zero-copy transfer with smaller, safer chunks
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
-		tcpFile, err := tcpConn.File()
-		if err != nil {
-			return fmt.Errorf("failed to get TCP file descriptor: %v", err)
-		}
-		defer tcpFile.Close()
-
 		// Use smaller chunks to prevent sendfile issues
 		chunkSize := int64(64 * 1024 * 1024) // 64MB chunks (reduced from 256MB)
 		var totalWritten int64
@@ -2248,7 +2236,7 @@ func (s *NetflixStreamService) streamWithSendfileZeroCopy(w http.ResponseWriter,
 			}
 
 			offsetPtr := offset
-			written, err := syscall.Sendfile(int(tcpFile.Fd()), int(file.Fd()), &offsetPtr, int(currentChunk))
+			written, err := transferSendfileOrCopy(tcpConn, file, &offsetPtr, int(currentChunk))
 			if err != nil {
 				return fmt.Errorf("sendfile chunk failed at offset %d: %v", offset, err)
 			}
@@ -2312,17 +2300,12 @@ func (s *NetflixStreamService) streamRangeWithZeroCopySendfile(w http.ResponseWr
 
 	// Use sendfile with offset for zero-copy range transfer
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
-		tcpFile, err := tcpConn.File()
-		if err == nil {
-			defer tcpFile.Close()
-
-			offsetPtr := offset
-			written, err := syscall.Sendfile(int(tcpFile.Fd()), int(file.Fd()), &offsetPtr, int(length))
-			if err == nil && int64(written) == length {
-				return nil
-			}
-			return fmt.Errorf("sendfile range incomplete: wrote %d, expected %d, error: %v", written, length, err)
+		offsetPtr := offset
+		written, err := transferSendfileOrCopy(tcpConn, file, &offsetPtr, int(length))
+		if err == nil && int64(written) == length {
+			return nil
 		}
+		return fmt.Errorf("sendfile range incomplete: wrote %d, expected %d, error: %v", written, length, err)
 	}
 
 	return fmt.Errorf("sendfile range setup failed")
@@ -2619,13 +2602,11 @@ func (s *NetflixStreamService) handlePreviewRangeRequestInstant(w http.ResponseW
 
 			// Use sendfile for zero-copy streaming
 			if tcpFile, ok := netConn.(*net.TCPConn); ok {
-				if f, err := tcpFile.File(); err == nil {
-					defer f.Close()
-					_, err := syscall.Sendfile(int(f.Fd()), int(file.Fd()), &start, int(contentLength))
-					if err == nil {
-						log.Printf("⚡ Zero-copy sendfile range stream: %d bytes", contentLength)
-						return nil
-					}
+				offsetPtr := start
+				_, err := transferSendfileOrCopy(tcpFile, file, &offsetPtr, int(contentLength))
+				if err == nil {
+					log.Printf("⚡ Zero-copy sendfile range stream: %d bytes", contentLength)
+					return nil
 				}
 			}
 		}
@@ -3017,16 +2998,11 @@ func (s *NetflixStreamService) streamPreviewSendfile(w http.ResponseWriter, r *h
 
 	// Use sendfile for zero-copy transfer
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
-		tcpFile, err := tcpConn.File()
-		if err == nil {
-			defer tcpFile.Close()
-
-			// Direct sendfile syscall for maximum performance
-			written, err := syscall.Sendfile(int(tcpFile.Fd()), int(file.Fd()), nil, int(fileSize))
-			if err == nil && int64(written) == fileSize {
-				log.Printf("⚡ Sendfile zero-copy: %d bytes (instant)", fileSize)
-				return nil
-			}
+		// Direct sendfile syscall for maximum performance
+		written, err := transferSendfileOrCopy(tcpConn, file, nil, int(fileSize))
+		if err == nil && int64(written) == fileSize {
+			log.Printf("⚡ Sendfile zero-copy: %d bytes (instant)", fileSize)
+			return nil
 		}
 	}
 
@@ -3079,16 +3055,11 @@ func (s *NetflixStreamService) streamRangeSendfile(w http.ResponseWriter, r *htt
 
 	// Use sendfile with offset for range
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
-		tcpFile, err := tcpConn.File()
-		if err == nil {
-			defer tcpFile.Close()
-
-			offsetPtr := offset
-			written, err := syscall.Sendfile(int(tcpFile.Fd()), int(file.Fd()), &offsetPtr, int(length))
-			if err == nil && int64(written) == length {
-				log.Printf("⚡ Sendfile range zero-copy: %d bytes at offset %d", length, offset)
-				return nil
-			}
+		offsetPtr := offset
+		written, err := transferSendfileOrCopy(tcpConn, file, &offsetPtr, int(length))
+		if err == nil && int64(written) == length {
+			log.Printf("⚡ Sendfile range zero-copy: %d bytes at offset %d", length, offset)
+			return nil
 		}
 	}
 
@@ -3828,7 +3799,7 @@ func (c *L2FileCache) GetOrCreate(filePath string, fileSize int64) ([]byte, erro
 
 	// Memory map with optimized flags for instant access
 	data, err := syscall.Mmap(int(file.Fd()), 0, int(fileSize),
-		syscall.PROT_READ, syscall.MAP_SHARED|syscall.MAP_POPULATE)
+		syscall.PROT_READ, mmapSharedPopulateFlags())
 	if err != nil {
 		return nil, err
 	}

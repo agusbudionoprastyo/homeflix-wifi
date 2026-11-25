@@ -8,12 +8,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 
 	"homeflix-backend/internal/models"
 	"homeflix-backend/internal/services"
+	"homeflix-backend/internal/utils"
 
 	"github.com/gin-gonic/gin"
 )
@@ -275,52 +275,7 @@ func TestSubtitles(mediaService *services.MediaService) gin.HandlerFunc {
 
 // extractLanguageFromFilename extracts language from subtitle filename
 func extractLanguageFromFilename(filename string) string {
-	langPatterns := map[string]string{
-		"en": "English", "eng": "English", "english": "English",
-		"es": "Spanish", "spa": "Spanish", "spanish": "Spanish",
-		"fr": "French", "fre": "French", "french": "French",
-		"de": "German", "ger": "German", "german": "German",
-		"it": "Italian", "ita": "Italian", "italian": "Italian",
-		"pt": "Portuguese", "por": "Portuguese", "portuguese": "Portuguese",
-		"ru": "Russian", "rus": "Russian", "russian": "Russian",
-		"ja": "Japanese", "jpn": "Japanese", "japanese": "Japanese",
-		"ko": "Korean", "kor": "Korean", "korean": "Korean",
-		"zh": "Chinese", "chi": "Chinese", "chinese": "Chinese",
-		"ar": "Arabic", "ara": "Arabic", "arabic": "Arabic",
-		"nl": "Dutch", "dut": "Dutch", "dutch": "Dutch",
-		"sv": "Swedish", "swe": "Swedish", "swedish": "Swedish",
-		"no": "Norwegian", "nor": "Norwegian", "norwegian": "Norwegian",
-		"da": "Danish", "dan": "Danish", "danish": "Danish",
-		"fi": "Finnish", "fin": "Finnish", "finnish": "Finnish",
-		"pl": "Polish", "pol": "Polish", "polish": "Polish",
-		"tr": "Turkish", "tur": "Turkish", "turkish": "Turkish",
-		"he": "Hebrew", "heb": "Hebrew", "hebrew": "Hebrew",
-		"th": "Thai", "tha": "Thai", "thai": "Thai",
-		"vi": "Vietnamese", "vie": "Vietnamese", "vietnamese": "Vietnamese",
-	}
-
-	lowerFilename := strings.ToLower(filename)
-	
-	// Try to find language patterns in filename
-	for code, language := range langPatterns {
-		patterns := []string{
-			fmt.Sprintf(`\.%s\.`, code),
-			fmt.Sprintf(`_%s_`, code),
-			fmt.Sprintf(`-%s-`, code),
-			fmt.Sprintf(`\.%s$`, code),
-			fmt.Sprintf(`_%s$`, code),
-			fmt.Sprintf(`-%s$`, code),
-		}
-		
-		for _, pattern := range patterns {
-			matched, _ := regexp.MatchString(pattern, lowerFilename)
-			if matched {
-				return language
-			}
-		}
-	}
-	
-	return "Unknown"
+	return utils.ExtractSubtitleLanguageFromFilename(filename)
 }
 
 // SearchOpenSubtitles searches for subtitles using OpenSubtitles API

@@ -73,9 +73,13 @@ func NewTorrentHandler(db *gorm.DB, mediaScanner MediaScannerInterface, notifica
 	if err := db.First(&config).Error; err != nil {
 		log.Printf("⚠️ No torrent config found, creating default: %v", err)
 		// Create default config with proper torrent download path
-		homeDir, _ := os.UserHomeDir()
+		downloadPath := strings.TrimSpace(os.Getenv("DOWNLOADS_PATH"))
+		if downloadPath == "" {
+			homeDir, _ := os.UserHomeDir()
+			downloadPath = filepath.Join(homeDir, "Downloads", "homeflix")
+		}
 		config = models.TorrentConfig{
-			DownloadPath:       filepath.Join(homeDir, "Downloads", "homeflix"),
+			DownloadPath:       downloadPath,
 			MinSeeders:         10,
 			MaxDownloads:       5,
 			AutoDownload:       false,
@@ -454,7 +458,54 @@ func (h *TorrentHandler) StartDownload(c *gin.Context) {
 // Enqueue starts a torrent and records it (used by the API and by
 // Auto Download). Returns the started download.
 func (h *TorrentHandler) Enqueue(magnet, title, mediaType string, tmdbID int, quality string, sizeHint int64) (*torrent.DownloadInfo, error) {
-	if h == nil || h.client == nil || h.db == nil {
+	if h == nil || h.db == nil {
+		return nil, fmt.Errorf("torrent handler not initialized")
+	}
+
+	// Get current config to check if remote qBit is enabled
+	var config models.TorrentConfig
+	if err := h.db.First(&config).Error; err == nil && config.UseRemoteClient && config.QbitURL != "" {
+		// --- Remote qBittorrent path ---
+		log.Printf("🌐 Routing download to remote qBittorrent: %s", config.QbitURL)
+		qbit := torrent.NewQbitClient(config.QbitURL, config.QbitUsername, config.QbitPassword)
+		savePath := config.QbitSavePath
+		if savePath == "" {
+			savePath = `C:\homeflix-downloads`
+		}
+		if err := qbit.AddMagnet(magnet, savePath); err != nil {
+			log.Printf("❌ Failed to add magnet to remote qBit: %v", err)
+			return nil, fmt.Errorf("remote qBittorrent error: %w", err)
+		}
+		// Create a placeholder DownloadInfo (hash not known until qBit processes it)
+		downloadID := fmt.Sprintf("qbit-%d", time.Now().UnixNano())
+		downloadInfo := &torrent.DownloadInfo{
+			ID:       downloadID,
+			Name:     title,
+			Status:   "downloading",
+			Progress: 0,
+			SavePath: savePath,
+		}
+		torrentDownload := models.TorrentDownload{
+			TorrentID:  downloadID,
+			Name:       title,
+			MagnetURI:  magnet,
+			Status:     "downloading",
+			Progress:   0,
+			SavePath:   savePath,
+			MediaType:  mediaType,
+			TMDBId:     tmdbID,
+			Quality:    quality,
+		}
+		if err := h.db.Create(&torrentDownload).Error; err != nil {
+			log.Printf("❌ Failed to save remote download to database: %v", err)
+			return nil, fmt.Errorf("failed to save download info")
+		}
+		log.Printf("✅ Remote download queued in qBittorrent: %s (%s)", title, downloadID)
+		return downloadInfo, nil
+	}
+
+	// --- Local Rain torrent client path ---
+	if h.client == nil {
 		return nil, fmt.Errorf("torrent client not initialized")
 	}
 	downloadInfo, err := h.client.AddMagnetSized(magnet, sizeHint)
@@ -1254,6 +1305,13 @@ func (h *TorrentHandler) UpdateConfig(c *gin.Context) {
 	// Update speed limit settings
 	config.DownloadSpeedLimit = req.DownloadSpeedLimit
 	config.UploadSpeedLimit = req.UploadSpeedLimit
+
+	// Update remote qBittorrent settings
+	config.UseRemoteClient = req.UseRemoteClient
+	config.QbitURL = req.QbitURL
+	config.QbitUsername = req.QbitUsername
+	config.QbitPassword = req.QbitPassword
+	config.QbitSavePath = req.QbitSavePath
 
 	if err := h.db.Save(&config).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update config"})
