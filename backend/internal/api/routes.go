@@ -608,6 +608,7 @@ func SetupRoutes(r *gin.Engine, mediaService *services.MediaService, streamServi
 		api.POST("/torrents/test-connection", torrentHandler.TestConnection)
 		api.POST("/torrents/test-qbit", torrentHandler.TestQbitConnection)
 		api.GET("/torrents/qbit-downloads", torrentHandler.GetQbitDownloads)
+		api.POST("/torrents/qbit-uploaded", torrentHandler.QbitUploaded)
 		api.GET("/torrents/bandwidth-stats", torrentHandler.GetBandwidthStats)
 		api.GET("/torrents/database-stats", torrentHandler.GetDatabaseStats) // Diagnostic endpoint
 

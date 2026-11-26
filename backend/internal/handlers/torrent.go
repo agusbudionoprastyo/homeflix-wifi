@@ -23,6 +23,7 @@ type TorrentHandler struct {
 	db                  *gorm.DB
 	client              *torrent.TorrentClient
 	searcher            *torrent.TorrentSearcher
+	mediaScanner        MediaScannerInterface
 	notificationService NotificationServiceInterface
 }
 
@@ -296,6 +297,7 @@ func NewTorrentHandler(db *gorm.DB, mediaScanner MediaScannerInterface, notifica
 		db:                  db,
 		client:              client,
 		searcher:            searcher,
+		mediaScanner:        mediaScanner,
 		notificationService: notificationService,
 	}
 }
@@ -468,16 +470,25 @@ func (h *TorrentHandler) Enqueue(magnet, title, mediaType string, tmdbID int, qu
 		// --- Remote qBittorrent path ---
 		log.Printf("🌐 Routing download to remote qBittorrent: %s", config.QbitURL)
 		qbit := torrent.NewQbitClient(config.QbitURL, config.QbitUsername, config.QbitPassword)
-		savePath := config.QbitSavePath
-		if savePath == "" {
-			savePath = `C:\homeflix-downloads`
+		baseSavePath := config.QbitSavePath
+		if baseSavePath == "" {
+			baseSavePath = `C:\homeflix-downloads`
 		}
-		if err := qbit.AddMagnet(magnet, savePath); err != nil {
+		category := "movie"
+		subDir := "Movies"
+		if strings.EqualFold(mediaType, "tv") {
+			category = "tv"
+			subDir = "TV"
+		}
+		savePath := strings.TrimRight(baseSavePath, `\/`) + `\` + subDir
+		if err := qbit.AddMagnetWithCategory(magnet, savePath, category); err != nil {
 			log.Printf("❌ Failed to add magnet to remote qBit: %v", err)
 			return nil, fmt.Errorf("remote qBittorrent error: %w", err)
 		}
-		// Create a placeholder DownloadInfo (hash not known until qBit processes it)
-		downloadID := fmt.Sprintf("qbit-%d", time.Now().UnixNano())
+		downloadID := torrent.ExtractMagnetHash(magnet)
+		if downloadID == "" {
+			downloadID = fmt.Sprintf("qbit-%d", time.Now().UnixNano())
+		}
 		downloadInfo := &torrent.DownloadInfo{
 			ID:       downloadID,
 			Name:     title,
@@ -562,10 +573,45 @@ func (h *TorrentHandler) GetDownloads(c *gin.Context) {
 	
 	offset := (page - 1) * limit
 
-	// Get current stats from client first
+	// If remote qBit mode: sync qBit live data into DB first
+	var config models.TorrentConfig
+	if h.db.First(&config).Error == nil && config.UseRemoteClient && config.QbitURL != "" {
+		qbit := torrent.NewQbitClient(config.QbitURL, config.QbitUsername, config.QbitPassword)
+		if qbitTorrents, err := qbit.GetTorrents(); err == nil {
+			now := time.Now()
+			for _, qt := range qbitTorrents {
+				status := torrent.QbitStateToHomeFlix(qt.State)
+				updates := map[string]interface{}{
+					"status":       status,
+					"progress":     qt.Progress * 100,
+					"downloaded":   qt.Downloaded,
+					"size":         qt.Size,
+					"save_path":    qt.SavePath,
+				}
+				if status == "completed" && qt.CompletedOn > 0 {
+					t := time.Unix(qt.CompletedOn, 0)
+					updates["completed_at"] = t
+				}
+				// Match by exact hash or by qbit- prefixed placeholder (first download)
+				h.db.Model(&models.TorrentDownload{}).
+					Where("LOWER(torrent_id) = ? OR (torrent_id LIKE 'qbit-%' AND name = ?)",
+						strings.ToLower(qt.Hash), qt.Name).
+					Updates(updates)
+				// If we matched a qbit- placeholder, update torrent_id to real hash
+				h.db.Model(&models.TorrentDownload{}).
+					Where("torrent_id LIKE 'qbit-%' AND name = ?", qt.Name).
+					Update("torrent_id", strings.ToLower(qt.Hash))
+				_ = now
+			}
+		} else {
+			log.Printf("⚠️ Failed to fetch qBit torrents for status sync: %v", err)
+		}
+	}
+
+	// Get current stats from local Rain client
 	clientDownloads := h.client.GetDownloads()
 	
-	// Update database with latest client stats
+	// Update database with latest local client stats
 	for _, clientDownload := range clientDownloads {
 		var completedAt *time.Time
 		if clientDownload.CompletedAt != nil {
@@ -748,20 +794,58 @@ func (h *TorrentHandler) GetDownloads(c *gin.Context) {
 // Get specific download
 func (h *TorrentHandler) GetDownload(c *gin.Context) {
 	id := c.Param("id")
-	
-	download, exists := h.client.GetDownload(id)
-	if !exists {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Download not found"})
+
+	// Try local Rain client first
+	if download, exists := h.client.GetDownload(id); exists {
+		c.JSON(http.StatusOK, download)
 		return
 	}
 
-	c.JSON(http.StatusOK, download)
+	// Fallback: check DB (for remote qBit downloads)
+	var dbDownload models.TorrentDownload
+	if err := h.db.Where("torrent_id = ?", id).First(&dbDownload).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Download not found"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"id":           dbDownload.TorrentID,
+		"name":         dbDownload.Name,
+		"status":       dbDownload.Status,
+		"progress":     dbDownload.Progress,
+		"downloaded":   dbDownload.Downloaded,
+		"size":         dbDownload.Size,
+		"save_path":    dbDownload.SavePath,
+		"media_type":   dbDownload.MediaType,
+		"added_at":     dbDownload.AddedAt,
+		"completed_at": dbDownload.CompletedAt,
+	})
+}
+
+// getQbitClientIfRemote returns a qBit client if the download belongs to remote qBit,
+// determined by checking the DB record (torrent_id starts with the hash not "qbit-" prefix
+// but config has use_remote_client=true) or by looking up config.
+func (h *TorrentHandler) getQbitClientIfRemote() *torrent.QbitClient {
+	var config models.TorrentConfig
+	if err := h.db.First(&config).Error; err != nil || !config.UseRemoteClient || config.QbitURL == "" {
+		return nil
+	}
+	return torrent.NewQbitClient(config.QbitURL, config.QbitUsername, config.QbitPassword)
 }
 
 // Pause download
 func (h *TorrentHandler) PauseDownload(c *gin.Context) {
 	id := c.Param("id")
-	
+
+	// Try remote qBit first if configured
+	if qbit := h.getQbitClientIfRemote(); qbit != nil {
+		if err := qbit.PauseTorrent(id); err != nil {
+			log.Printf("⚠️ qBit pause failed for %s: %v", id, err)
+		}
+		h.db.Model(&models.TorrentDownload{}).Where("torrent_id = ?", id).Update("status", "paused")
+		c.JSON(http.StatusOK, gin.H{"message": "Download paused"})
+		return
+	}
+
 	if err := h.client.PauseDownload(id); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -769,7 +853,6 @@ func (h *TorrentHandler) PauseDownload(c *gin.Context) {
 
 	// Get updated download info to save current progress
 	if download, exists := h.client.GetDownload(id); exists {
-		// Update database with current progress and paused status
 		h.db.Model(&models.TorrentDownload{}).
 			Where("torrent_id = ?", id).
 			Updates(map[string]interface{}{
@@ -779,10 +862,7 @@ func (h *TorrentHandler) PauseDownload(c *gin.Context) {
 				"size":       download.Size,
 			})
 	} else {
-		// Fallback to just updating status
-		h.db.Model(&models.TorrentDownload{}).
-			Where("torrent_id = ?", id).
-			Update("status", "paused")
+		h.db.Model(&models.TorrentDownload{}).Where("torrent_id = ?", id).Update("status", "paused")
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Download paused"})
@@ -791,15 +871,23 @@ func (h *TorrentHandler) PauseDownload(c *gin.Context) {
 // Resume download
 func (h *TorrentHandler) ResumeDownload(c *gin.Context) {
 	id := c.Param("id")
-	
+
+	// Try remote qBit first if configured
+	if qbit := h.getQbitClientIfRemote(); qbit != nil {
+		if err := qbit.ResumeTorrent(id); err != nil {
+			log.Printf("⚠️ qBit resume failed for %s: %v", id, err)
+		}
+		h.db.Model(&models.TorrentDownload{}).Where("torrent_id = ?", id).Update("status", "downloading")
+		c.JSON(http.StatusOK, gin.H{"message": "Download resumed"})
+		return
+	}
+
 	if err := h.client.ResumeDownload(id); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Get updated download info after resuming
 	if download, exists := h.client.GetDownload(id); exists {
-		// Update database with resumed status and current progress
 		h.db.Model(&models.TorrentDownload{}).
 			Where("torrent_id = ?", id).
 			Updates(map[string]interface{}{
@@ -809,10 +897,7 @@ func (h *TorrentHandler) ResumeDownload(c *gin.Context) {
 				"size":       download.Size,
 			})
 	} else {
-		// Fallback to just updating status
-		h.db.Model(&models.TorrentDownload{}).
-			Where("torrent_id = ?", id).
-			Update("status", "downloading")
+		h.db.Model(&models.TorrentDownload{}).Where("torrent_id = ?", id).Update("status", "downloading")
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Download resumed"})
@@ -829,26 +914,30 @@ func (h *TorrentHandler) RemoveDownload(c *gin.Context) {
 		return
 	}
 
-	// Get download info from client to get current save path
-	clientDownload, exists := h.client.GetDownload(id)
-	var savePath string
-	if exists && clientDownload.SavePath != "" {
-		savePath = clientDownload.SavePath
-	} else {
-		savePath = torrentDownload.SavePath
-	}
+	savePath := torrentDownload.SavePath
 
-	// Try to remove from torrent client (don't fail if this doesn't work)
-	if err := h.client.RemoveDownload(id); err != nil {
-		log.Printf("⚠️ Failed to remove torrent from client (may already be removed): %v", err)
-		// Continue with cleanup even if client removal fails
+	// Try remote qBit remove first if configured
+	if qbit := h.getQbitClientIfRemote(); qbit != nil {
+		if err := qbit.DeleteTorrent(id, false); err != nil {
+			log.Printf("⚠️ qBit delete failed for %s (may not exist there): %v", id, err)
+		} else {
+			log.Printf("✅ Removed torrent from remote qBit: %s", id)
+		}
 	} else {
-		log.Printf("✅ Successfully removed torrent from client: %s", id)
+		// Local client path: get save path from client first
+		if clientDownload, exists := h.client.GetDownload(id); exists && clientDownload.SavePath != "" {
+			savePath = clientDownload.SavePath
+		}
+		if err := h.client.RemoveDownload(id); err != nil {
+			log.Printf("⚠️ Failed to remove torrent from local client: %v", err)
+		} else {
+			log.Printf("✅ Successfully removed torrent from local client: %s", id)
+		}
 	}
 
 	// Safely remove only the specific torrent files, not the entire directory
 	var removedFiles []string
-	if savePath != "" {
+	if savePath != "" && !strings.HasPrefix(savePath, `C:\`) {
 		removedFiles = h.removeSpecificTorrentFiles(savePath, torrentDownload.Name)
 	}
 
@@ -1516,6 +1605,50 @@ func (h *TorrentHandler) Abandon(torrentID string) error {
 	err := h.client.Abandon(torrentID)
 	h.db.Where("torrent_id = ?", torrentID).Delete(&models.TorrentDownload{})
 	return err
+}
+
+// QbitUploaded handles completion webhook notifications from remote qBittorrent after rclone upload to Google Drive.
+func (h *TorrentHandler) QbitUploaded(c *gin.Context) {
+	var req struct {
+		Hash       string `json:"hash"`
+		Name       string `json:"name"`
+		RemotePath string `json:"remote_path"`
+		MediaType  string `json:"media_type"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	log.Printf("☁️ Remote qBit upload completed: name=%q hash=%q remote_path=%q type=%q", req.Name, req.Hash, req.RemotePath, req.MediaType)
+
+	now := time.Now()
+	updates := map[string]interface{}{
+		"status":       "completed",
+		"progress":     100.0,
+		"completed_at": &now,
+	}
+	if req.Hash != "" {
+		h.db.Model(&models.TorrentDownload{}).
+			Where("LOWER(torrent_id) LIKE ?", "%"+strings.ToLower(strings.TrimSpace(req.Hash))+"%").
+			Updates(updates)
+	} else if req.Name != "" {
+		h.db.Model(&models.TorrentDownload{}).
+			Where("name = ? AND status != ?", req.Name, "completed").
+			Updates(updates)
+	}
+
+	if h.mediaScanner != nil {
+		go func() {
+			time.Sleep(5 * time.Second)
+			log.Printf("🔍 Triggering media library scan after Google Drive upload (%s)", req.Name)
+			if err := h.mediaScanner.ScanMediaLibrary(); err != nil {
+				log.Printf("⚠️ Media scan after qbit upload failed: %v", err)
+			}
+		}()
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "acknowledged"})
 }
 
 // Auto Download drops stalled releases through Abandon.
