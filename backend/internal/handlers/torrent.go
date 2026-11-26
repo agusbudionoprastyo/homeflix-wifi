@@ -573,13 +573,15 @@ func (h *TorrentHandler) GetDownloads(c *gin.Context) {
 	
 	offset := (page - 1) * limit
 
-	// If remote qBit mode: sync qBit live data into DB first
+	// If remote qBit mode: sync qBit live data into DB first and keep live map for API response
+	qbitMap := make(map[string]torrent.QbitTorrent)
 	var config models.TorrentConfig
 	if h.db.First(&config).Error == nil && config.UseRemoteClient && config.QbitURL != "" {
 		qbit := torrent.NewQbitClient(config.QbitURL, config.QbitUsername, config.QbitPassword)
 		if qbitTorrents, err := qbit.GetTorrents(); err == nil {
-			now := time.Now()
 			for _, qt := range qbitTorrents {
+				hashLower := strings.ToLower(qt.Hash)
+				qbitMap[hashLower] = qt
 				status := torrent.QbitStateToHomeFlix(qt.State)
 				updates := map[string]interface{}{
 					"status":       status,
@@ -595,13 +597,12 @@ func (h *TorrentHandler) GetDownloads(c *gin.Context) {
 				// Match by exact hash or by qbit- prefixed placeholder (first download)
 				h.db.Model(&models.TorrentDownload{}).
 					Where("LOWER(torrent_id) = ? OR (torrent_id LIKE 'qbit-%' AND name = ?)",
-						strings.ToLower(qt.Hash), qt.Name).
+						hashLower, qt.Name).
 					Updates(updates)
 				// If we matched a qbit- placeholder, update torrent_id to real hash
 				h.db.Model(&models.TorrentDownload{}).
 					Where("torrent_id LIKE 'qbit-%' AND name = ?", qt.Name).
-					Update("torrent_id", strings.ToLower(qt.Hash))
-				_ = now
+					Update("torrent_id", hashLower)
 			}
 		} else {
 			log.Printf("⚠️ Failed to fetch qBit torrents for status sync: %v", err)
@@ -756,13 +757,19 @@ func (h *TorrentHandler) GetDownloads(c *gin.Context) {
 			"completed_at": completedAt,
 		}
 
-		// Add real-time stats from client if available
+		// Add real-time stats from local client or remote qBit if available
 		if exists {
 			apiDownload["download_rate"] = clientDownload.DownloadRate
 			apiDownload["upload_rate"] = clientDownload.UploadRate
 			apiDownload["seeders"] = clientDownload.Seeders
 			apiDownload["peers"] = clientDownload.Peers
 			apiDownload["eta"] = clientDownload.ETA
+		} else if qt, ok := qbitMap[strings.ToLower(dbDownload.TorrentID)]; ok {
+			apiDownload["download_rate"] = qt.DownloadSpeed
+			apiDownload["upload_rate"] = qt.UploadSpeed
+			apiDownload["seeders"] = qt.Seeders
+			apiDownload["peers"] = qt.Seeders + qt.Peers
+			apiDownload["eta"] = torrent.FormatQbitETA(qt.ETA)
 		} else {
 			// Default values if client doesn't have the download
 			apiDownload["download_rate"] = 0
